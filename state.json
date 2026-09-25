@@ -2,25 +2,25 @@
   "indices": {
     "Nifty 100": {
       "zone": "OVERSOLD",
-      "extreme": 17.77143009844137,
+      "extreme": 17.54383657883524,
       "since": null,
-      "ticker": "^CNX100",
-      "rsi": 17.77
+      "ticker": "TV:NSE:CNX100",
+      "rsi": 17.54
     },
     "Nifty Next 50": {
       "zone": "NEUTRAL",
       "extreme": null,
       "since": null,
-      "ticker": "^NSMIDCP",
-      "rsi": 31.79
+      "ticker": "TV:NSE:NIFTYJR",
+      "rsi": 31.2
     },
     "Nifty Midcap 100": {
-      "zone": "OVERBOUGHT",
-      "extreme": 99.72137397529266,
+      "zone": "NEUTRAL",
+      "extreme": null,
       "since": null,
-      "ticker": "NIFTY_MIDCAP_100.NS",
-      "rsi": 99.72
+      "ticker": "TV:NSE:CNXMIDCAP",
+      "rsi": 27.35
     }
   },
-  "last_run": "2026-09-25T14:19:24+05:30"
+  "last_run": "2026-09-25T14:25:17+05:30"
 }
