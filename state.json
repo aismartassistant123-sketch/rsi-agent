@@ -1,0 +1,19 @@
+{
+  "indices": {
+    "Nifty 100": {
+      "zone": "OVERSOLD",
+      "extreme": 18.0255000689438,
+      "since": null,
+      "ticker": "^CNX100",
+      "rsi": 18.03
+    },
+    "Nifty Next 50": {
+      "zone": "NEUTRAL",
+      "extreme": null,
+      "since": null,
+      "ticker": "^NSMIDCP",
+      "rsi": 31.84
+    }
+  },
+  "last_run": "2026-09-25T14:04:26+05:30"
+}
