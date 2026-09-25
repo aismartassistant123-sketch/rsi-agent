@@ -35,9 +35,9 @@ ALERT_OVERBOUGHT = True  # set False for buy-side alerts only
 # First ticker that returns data is used (Yahoo symbols shift occasionally).
 INDICES = {
     "Nifty 100":           ["^CNX100", "NIFTY_100.NS"],
-    "Nifty Next 50":       ["^NSMIDCP", "NIFTY_NEXT_50.NS"],
-    "Nifty Midcap 100":    ["NIFTY_MIDCAP_100.NS", "^CNXMIDCAP", "^CRSMID"],
-    "Nifty Smallcap 100":  ["^CNXSC", "NIFTY_SMLCAP_100.NS"],
+    "Nifty Next 50":       ["^NSMIDCP", "^CNXNIFTYJR"],
+    "Nifty Midcap 100":    ["^CRSMID", "NIFTY_MIDCAP_100.NS"],
+    "Nifty Smallcap 100":  ["^CNXSC", "^CNXSMCP"],
 }
 
 STATE_FILE = Path(__file__).with_name("state.json")
@@ -78,14 +78,27 @@ def monthly_close(daily: pd.Series) -> pd.Series:
 
 
 # ---------------------------------------------------------------- data
-def fetch_daily(tickers: list[str]) -> tuple[str, pd.Series]:
+MIN_MONTHS = 24  # need at least this many monthly candles for a meaningful RSI
+
+# Official index names on niftyindices.com (NSE), used when Yahoo fails.
+NSE_NAMES = {
+    "Nifty 100": "NIFTY 100",
+    "Nifty Next 50": "NIFTY NEXT 50",
+    "Nifty Midcap 100": "NIFTY MIDCAP 100",
+    "Nifty Smallcap 100": "NIFTY SMALLCAP 100",
+}
+
+
+def _yahoo(ticker: str) -> pd.Series | None:
     import yfinance as yf
 
-    for t in tickers:
+    # Some Indian index symbols only answer to certain period/interval combinations.
+    for period, interval in (("max", "1d"), ("10y", "1d"), ("max", "1mo"), ("5y", "1d")):
         try:
-            df = yf.download(t, period="20y", interval="1d", progress=False, auto_adjust=False)
+            df = yf.download(ticker, period=period, interval=interval,
+                             progress=False, auto_adjust=False)
         except Exception as e:  # noqa: BLE001
-            print(f"  {t}: {e}", file=sys.stderr)
+            print(f"    yahoo {ticker} {period}/{interval}: {e}", file=sys.stderr)
             continue
         if df is None or df.empty:
             continue
@@ -93,9 +106,68 @@ def fetch_daily(tickers: list[str]) -> tuple[str, pd.Series]:
         if isinstance(close, pd.DataFrame):
             close = close.iloc[:, 0]
         close = close.dropna()
-        if len(close) > 300:
-            return t, close
-    raise RuntimeError(f"No data for any of {tickers}")
+        close.index = pd.to_datetime(close.index).tz_localize(None)
+        if len(monthly_close(close)) >= MIN_MONTHS:
+            return close
+    return None
+
+
+def _niftyindices(index_name: str, years: int = 12) -> pd.Series | None:
+    """Daily closes from NSE's niftyindices.com, fetched one year at a time."""
+    import urllib.request
+
+    url = "https://www.niftyindices.com/Backpage.aspx/getHistoricaldatatabletoString"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Content-Type": "application/json; charset=UTF-8",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Origin": "https://www.niftyindices.com",
+        "Referer": "https://www.niftyindices.com/reports/historical-data",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    today = datetime.now(IST).date()
+    rows = []
+    for y in range(years, -1, -1):
+        start = today.replace(year=today.year - y, month=1, day=1) if y else today.replace(month=1, day=1)
+        end = min(start.replace(month=12, day=31), today)
+        cinfo = (f"{{'name':'{index_name}','startDate':'{start:%d-%b-%Y}',"
+                 f"'endDate':'{end:%d-%b-%Y}','indexName':'{index_name}'}}")
+        body = json.dumps({"cinfo": cinfo}).encode()
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as r:
+                payload = json.loads(r.read().decode())
+            rows += json.loads(payload["d"])
+        except Exception as e:  # noqa: BLE001
+            print(f"    niftyindices {index_name} {start.year}: {e}", file=sys.stderr)
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    cols = {c.lower(): c for c in df.columns}
+    date_col = cols.get("historicaldate") or cols.get("date")
+    close_col = cols.get("close")
+    if not date_col or not close_col:
+        print(f"    niftyindices {index_name}: unexpected columns {list(df.columns)}", file=sys.stderr)
+        return None
+    s = pd.Series(pd.to_numeric(df[close_col].astype(str).str.replace(",", ""), errors="coerce").values,
+                  index=pd.to_datetime(df[date_col], format="mixed", dayfirst=True))
+    s = s.dropna().sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    return s if len(monthly_close(s)) >= MIN_MONTHS else None
+
+
+def fetch_daily(name: str, tickers: list[str]) -> tuple[str, pd.Series]:
+    for t in tickers:
+        s = _yahoo(t)
+        if s is not None:
+            return t, s
+    nse = NSE_NAMES.get(name)
+    if nse:
+        s = _niftyindices(nse)
+        if s is not None:
+            return f"NSE:{nse}", s
+    raise RuntimeError(f"No data from Yahoo {tickers} or niftyindices.com")
 
 
 # ---------------------------------------------------------------- signals
@@ -220,7 +292,7 @@ def run(data: dict[str, pd.Series] | None = None, dry_run: bool = False) -> list
             ticker, daily = "test", data[name]
         else:
             try:
-                ticker, daily = fetch_daily(tickers)
+                ticker, daily = fetch_daily(name, tickers)
             except RuntimeError as e:
                 print(f"SKIP {name}: {e}", file=sys.stderr)
                 continue
