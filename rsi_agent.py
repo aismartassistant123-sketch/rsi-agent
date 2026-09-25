@@ -32,12 +32,13 @@ MA_LEN = 14
 UPPER, MIDDLE, LOWER = 80.0, 50.0, 20.0
 ALERT_OVERBOUGHT = True  # set False for buy-side alerts only
 
-# First ticker that returns data is used (Yahoo symbols shift occasionally).
+# Data sources per index, tried in order. "TV:" = TradingView (same feed as your chart),
+# anything else = Yahoo Finance symbol.
 INDICES = {
-    "Nifty 100":           ["^CNX100", "NIFTY_100.NS"],
-    "Nifty Next 50":       ["^NSMIDCP", "^CNXNIFTYJR"],
-    "Nifty Midcap 100":    ["^CRSMID", "NIFTY_MIDCAP_100.NS"],
-    "Nifty Smallcap 100":  ["^CNXSC", "^CNXSMCP"],
+    "Nifty 100":           ["TV:NSE:CNX100", "^CNX100"],
+    "Nifty Next 50":       ["TV:NSE:NIFTYJR", "^NSMIDCP"],
+    "Nifty Midcap 100":    ["TV:NSE:CNXMIDCAP"],
+    "Nifty Smallcap 100":  ["TV:NSE:CNXSMALLCAP"],
 }
 
 STATE_FILE = Path(__file__).with_name("state.json")
@@ -78,22 +79,77 @@ def monthly_close(daily: pd.Series) -> pd.Series:
 
 
 # ---------------------------------------------------------------- data
-MIN_MONTHS = 24  # need at least this many monthly candles for a meaningful RSI
+MIN_MONTHS = 24        # need at least this many monthly candles for a meaningful RSI
+MAX_MONTH_MOVE = 0.45  # a >45% month-on-month move means the feed is broken, not the market
+STALE_DAYS = 10        # latest bar older than this = feed stopped updating
 
-# Official index names on niftyindices.com (NSE), used when Yahoo fails.
-NSE_NAMES = {
-    "Nifty 100": "NIFTY 100",
-    "Nifty Next 50": "NIFTY NEXT 50",
-    "Nifty Midcap 100": "NIFTY MIDCAP 100",
-    "Nifty Smallcap 100": "NIFTY SMALLCAP 100",
-}
+
+def _tv_frames(raw: str):
+    """Split a TradingView websocket payload into JSON messages."""
+    i = 0
+    while i < len(raw):
+        if not raw.startswith("~m~", i):
+            break
+        j = raw.index("~m~", i + 3)
+        n = int(raw[i + 3:j])
+        yield raw[j + 3:j + 3 + n]
+        i = j + 3 + n
+
+
+def _tradingview(symbol: str, bars: int = 400) -> pd.Series | None:
+    """Monthly closes straight from TradingView (anonymous, like the free chart)."""
+    import random
+    import string
+    from websocket import create_connection
+
+    def msg(func, params):
+        body = json.dumps({"m": func, "p": params}, separators=(",", ":"))
+        return f"~m~{len(body)}~m~{body}"
+
+    rnd = lambda p: p + "".join(random.choices(string.ascii_lowercase, k=12))  # noqa: E731
+    cs = rnd("cs_")
+    ws = create_connection("wss://data.tradingview.com/socket.io/websocket",
+                           header=["Origin: https://www.tradingview.com"], timeout=15)
+    try:
+        for f, p in (
+            ("set_auth_token", ["unauthorized_user_token"]),
+            ("chart_create_session", [cs, ""]),
+            ("resolve_symbol", [cs, "sym", '={"symbol":"%s","adjustment":"splits","session":"regular"}' % symbol]),
+            ("create_series", [cs, "s1", "s1", "sym", "1M", bars]),
+        ):
+            ws.send(msg(f, p))
+        points = {}
+        while True:
+            raw = ws.recv()
+            for frame in _tv_frames(raw):
+                if frame.startswith("~h~"):          # heartbeat: echo it back
+                    ws.send(f"~m~{len(frame)}~m~{frame}")
+                    continue
+                try:
+                    m = json.loads(frame)
+                except ValueError:
+                    continue
+                kind = m.get("m")
+                if kind in ("timescale_update", "du"):
+                    for bar in m["p"][1].get("s1", {}).get("s", []):
+                        ts, _o, _h, _l, close = bar["v"][:5]
+                        points[ts] = close
+                elif kind in ("symbol_error", "series_error", "critical_error"):
+                    print(f"    tradingview {symbol}: {m['p']}", file=sys.stderr)
+                    return None
+                elif kind == "series_completed":
+                    if not points:
+                        return None
+                    idx = pd.to_datetime(list(points), unit="s", utc=True).tz_convert(IST).tz_localize(None)
+                    return pd.Series(list(points.values()), index=idx).sort_index()
+    finally:
+        ws.close()
 
 
 def _yahoo(ticker: str) -> pd.Series | None:
     import yfinance as yf
 
-    # Some Indian index symbols only answer to certain period/interval combinations.
-    for period, interval in (("max", "1d"), ("10y", "1d"), ("max", "1mo"), ("5y", "1d")):
+    for period, interval in (("max", "1d"), ("10y", "1d")):
         try:
             df = yf.download(ticker, period=period, interval=interval,
                              progress=False, auto_adjust=False)
@@ -107,67 +163,40 @@ def _yahoo(ticker: str) -> pd.Series | None:
             close = close.iloc[:, 0]
         close = close.dropna()
         close.index = pd.to_datetime(close.index).tz_localize(None)
-        if len(monthly_close(close)) >= MIN_MONTHS:
-            return close
+        return close
     return None
 
 
-def _niftyindices(index_name: str, years: int = 12) -> pd.Series | None:
-    """Daily closes from NSE's niftyindices.com, fetched one year at a time."""
-    import urllib.request
-
-    url = "https://www.niftyindices.com/Backpage.aspx/getHistoricaldatatabletoString"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Content-Type": "application/json; charset=UTF-8",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Origin": "https://www.niftyindices.com",
-        "Referer": "https://www.niftyindices.com/reports/historical-data",
-        "X-Requested-With": "XMLHttpRequest",
-    }
-    today = datetime.now(IST).date()
-    rows = []
-    for y in range(years, -1, -1):
-        start = today.replace(year=today.year - y, month=1, day=1) if y else today.replace(month=1, day=1)
-        end = min(start.replace(month=12, day=31), today)
-        cinfo = (f"{{'name':'{index_name}','startDate':'{start:%d-%b-%Y}',"
-                 f"'endDate':'{end:%d-%b-%Y}','indexName':'{index_name}'}}")
-        body = json.dumps({"cinfo": cinfo}).encode()
-        try:
-            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=30) as r:
-                payload = json.loads(r.read().decode())
-            rows += json.loads(payload["d"])
-        except Exception as e:  # noqa: BLE001
-            print(f"    niftyindices {index_name} {start.year}: {e}", file=sys.stderr)
-    if not rows:
-        return None
-    df = pd.DataFrame(rows)
-    cols = {c.lower(): c for c in df.columns}
-    date_col = cols.get("historicaldate") or cols.get("date")
-    close_col = cols.get("close")
-    if not date_col or not close_col:
-        print(f"    niftyindices {index_name}: unexpected columns {list(df.columns)}", file=sys.stderr)
-        return None
-    s = pd.Series(pd.to_numeric(df[close_col].astype(str).str.replace(",", ""), errors="coerce").values,
-                  index=pd.to_datetime(df[date_col], format="mixed", dayfirst=True))
-    s = s.dropna().sort_index()
-    s = s[~s.index.duplicated(keep="last")]
-    return s if len(monthly_close(s)) >= MIN_MONTHS else None
+def _usable(src: str, s: pd.Series | None) -> bool:
+    if s is None or s.empty:
+        return False
+    m = monthly_close(s)
+    if len(m) < MIN_MONTHS:
+        print(f"    {src}: only {len(m)} monthly candles", file=sys.stderr)
+        return False
+    worst = m.pct_change().abs().max()
+    if worst > MAX_MONTH_MOVE:
+        print(f"    {src}: rejected, {worst:.0%} single-month jump (bad data)", file=sys.stderr)
+        return False
+    age = (datetime.now(IST).replace(tzinfo=None) - s.index[-1]).days
+    if age > STALE_DAYS and not src.startswith("TV:"):  # TV monthly bars are stamped at month start
+        print(f"    {src}: rejected, last price is {age} days old", file=sys.stderr)
+        return False
+    return True
 
 
-def fetch_daily(name: str, tickers: list[str]) -> tuple[str, pd.Series]:
-    for t in tickers:
-        s = _yahoo(t)
-        if s is not None:
-            return t, s
-    nse = NSE_NAMES.get(name)
-    if nse:
-        s = _niftyindices(nse)
-        if s is not None:
-            return f"NSE:{nse}", s
-    raise RuntimeError(f"No data from Yahoo {tickers} or niftyindices.com")
+def fetch_daily(name: str, sources: list[str]) -> tuple[str, pd.Series]:
+    for src in sources:
+        for attempt in range(3):
+            try:
+                s = _tradingview(src[3:]) if src.startswith("TV:") else _yahoo(src)
+                break
+            except Exception as e:  # noqa: BLE001
+                print(f"    {src} attempt {attempt + 1}: {e}", file=sys.stderr)
+                s = None
+        if _usable(src, s):
+            return src, s
+    raise RuntimeError(f"No usable data from {sources}")
 
 
 # ---------------------------------------------------------------- signals
@@ -302,7 +331,7 @@ def run(data: dict[str, pd.Series] | None = None, dry_run: bool = False) -> list
         rsi_now = float(rsi.iloc[-1])
 
         prev = idx_state.get(name)
-        if prev is None:
+        if prev is None or prev.get("ticker") != ticker:  # new index or new data source
             new, evs = seed_zone(rsi), []
         else:
             new, evs = evaluate(name, rsi_now, prev)
