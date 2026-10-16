@@ -5,22 +5,22 @@
       "extreme": null,
       "since": null,
       "ticker": "TV:NSE:CNX100",
-      "rsi": 30.63
+      "rsi": 38.08
     },
     "Nifty Next 50": {
       "zone": "OVERSOLD",
       "extreme": 10.845654093482608,
       "since": "2026-10-07",
       "ticker": "TV:NSE:NIFTYJR",
-      "rsi": 13.97
+      "rsi": 15.29
     },
     "Nifty Midcap 100": {
       "zone": "OVERSOLD",
-      "extreme": 19.72965059313951,
+      "extreme": 19.332337987757597,
       "since": "2026-10-15",
       "ticker": "TV:NSE:CNXMIDCAP",
-      "rsi": 19.73
+      "rsi": 19.33
     }
   },
-  "last_run": "2026-10-15T20:49:51+05:30"
+  "last_run": "2026-10-16T20:30:20+05:30"
 }
