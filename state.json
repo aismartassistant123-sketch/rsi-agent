@@ -5,22 +5,22 @@
       "extreme": 85.32120671588827,
       "since": "2026-11-05",
       "ticker": "TV:NSE:CNX100",
-      "rsi": 85.32
+      "rsi": 84.4
     },
     "Nifty Next 50": {
       "zone": "NEUTRAL",
       "extreme": null,
       "since": null,
       "ticker": "TV:NSE:NIFTYJR",
-      "rsi": 74.53
+      "rsi": 72.46
     },
     "Nifty Midcap 100": {
       "zone": "NEUTRAL",
       "extreme": null,
       "since": null,
       "ticker": "TV:NSE:CNXMIDCAP",
-      "rsi": 69.07
+      "rsi": 68.43
     }
   },
-  "last_run": "2026-11-13T00:06:14+05:30"
+  "last_run": "2026-11-13T23:35:20+05:30"
 }
